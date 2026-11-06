@@ -102,6 +102,9 @@ where
     /// Byte offsets of IME composing preedit text in the text buffer.
     /// `None` if the IME is not currently composing.
     compose: Option<Range<usize>>,
+    /// Styles of parts of the preedit, by byte ranges relative to its start.
+    /// Empty, the whole preedit is underlined.
+    compose_styles: Vec<(Range<usize>, StyleProperty<'static, T>)>,
     /// Whether the cursor should be shown. The IME can request to hide the cursor.
     show_cursor: bool,
     width: Option<f32>,
@@ -136,6 +139,7 @@ where
             layout_access: LayoutAccessibility::default(),
             selection: Selection::default(),
             compose: None,
+            compose_styles: Vec::new(),
             show_cursor: true,
             width: None,
             font_size,
@@ -391,6 +395,24 @@ where
         ));
     }
 
+    /// Set the styles of parts of the preedit, each a byte range relative to
+    /// the start of the preedit text and a style for it, such as the
+    /// underline, its brush and the background an input method's segments
+    /// call for. Ranges past the end of the preedit are cut off.
+    ///
+    /// With no styles, the whole preedit is underlined, as before. The styles
+    /// stay with the preedit when [`set_compose`](Self::set_compose) changes
+    /// its text, so they are set again after it; ending composing clears them.
+    pub fn set_compose_styles(
+        &mut self,
+        styles: impl IntoIterator<Item = (Range<usize>, StyleProperty<'static, T>)>,
+    ) {
+        self.editor.compose_styles = styles.into_iter().collect();
+        if self.editor.compose.is_some() {
+            self.update_layout();
+        }
+    }
+
     /// Set the preedit range to a range of byte indices.
     /// This leaves the selection and cursor unchanged.
     ///
@@ -408,6 +430,7 @@ where
     /// and moves the cursor to the start of the former preedit region.
     pub fn clear_compose(&mut self) {
         if let Some(preedit_range) = self.editor.compose.take() {
+            self.editor.compose_styles.clear();
             self.editor.buffer.replace_range(preedit_range.clone(), "");
             self.editor.show_cursor = true;
             self.update_layout();
@@ -423,6 +446,7 @@ where
     /// it was hidden.
     pub fn finish_compose(&mut self) {
         if self.editor.compose.take().is_some() {
+            self.editor.compose_styles.clear();
             self.editor.show_cursor = true;
             self.update_layout();
         }
@@ -976,6 +1000,7 @@ where
         self.buffer.push_str(is);
         self.layout_dirty = true;
         self.compose = None;
+        self.compose_styles.clear();
     }
 
     /// Set the width of the layout.
@@ -1153,6 +1178,7 @@ where
         if new_len < old_range.len() {
             if compose.start >= (old_range.start + new_len) {
                 self.compose = None;
+                self.compose_styles.clear();
                 return;
             }
             compose.end = compose.end.min(old_range.start + new_len);
@@ -1233,7 +1259,17 @@ where
             builder.push_default(prop.to_owned());
         }
         if let Some(preedit_range) = &self.compose {
-            builder.push(StyleProperty::Underline(true), preedit_range.clone());
+            if self.compose_styles.is_empty() {
+                builder.push(StyleProperty::Underline(true), preedit_range.clone());
+            } else {
+                for (range, style) in &self.compose_styles {
+                    let start = (preedit_range.start + range.start).min(preedit_range.end);
+                    let end = (preedit_range.start + range.end).min(preedit_range.end);
+                    if start < end {
+                        builder.push(style.clone(), start..end);
+                    }
+                }
+            }
         }
         self.layout = builder.build(&self.buffer);
         self.layout.break_all_lines(self.width);
